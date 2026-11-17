@@ -1,7 +1,7 @@
 // A working token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), fits
-// the radar-2 comparables model from the snapshot's own traded protocols (lib/model.ts), writes
+// the radar-3 comparables model from the snapshot's own traded protocols (lib/model.ts), writes
 // the ranked board to /output/board.json, and copies this repository's dashboard/ and
 // screenshots/ to /output. Last, it writes /output/dossier.json, the summary the judge reads,
 // with the vendored make.fun library.
@@ -88,6 +88,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: curve log(mcap) = ${radar.model_fit.intercept} + ${radar.model_fit.slope} * log(tvl) on ${radar.model_fit.n_comps} comps, R2 ${radar.model_fit.curve_r2}, LOO median log error ${radar.model_fit.loo_median_abs_log_err}, walk-forward median ${radar.model_fit.walk_forward_median_abs_log_err}\n` +
+    `token radar: curve log(mcap) = ${radar.model_fit.intercept} + ${radar.model_fit.slope} * log(tvl) on ${radar.model_fit.n_comps} clean comps (${radar.model_fit.n_comps_raw} traded, dropped ${radar.model_fit.dropped_comps.join(', ') || 'none'}), R2 ${radar.model_fit.curve_r2}, LOO median log error ${radar.model_fit.loo_median_abs_log_err}, walk-forward median ${radar.model_fit.walk_forward_median_abs_log_err}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

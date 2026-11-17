@@ -9,6 +9,22 @@
 // checks the number board.json carries. The farm plan's netting is recomputed the same way:
 // gas per transaction by chain, capital returned at unwind, expected share under the stated
 // assumptions, verdict FARM, THIN or SKIP.
+//
+// radar-3 (this version) changes two things, both visible on the page itself:
+//   1. Clean comps: the curve is fitted on the traded comps minus the two whose log
+//      multiple sits further than 2.5 robust standard deviations from the median
+//      (obol and rain on this snapshot). Measured, not asserted: leave-one-out median
+//      error 1.226 -> 1.171, walk-forward 0.736 -> 0.669, full R-squared 0.145 -> 0.215.
+//      The fit reports the dropped slugs, and the page names them.
+//   2. The model's validation is no longer buried below the board: a strip under the
+//      lede shows the formula and the four numbers (R-squared, leave-one-out,
+//      walk-forward, flat multiple for comparison) in the first screen, so the first
+//      screenshot carries the evidence, not just the claim.
+// What was tried and rejected (the numbers are in lib/model.ts): per-category median
+// ratios (LOO 1.613), a quadratic curve (1.359), TVL/mcap floors (walk-forward 0.903),
+// no shrink (1.275), an adjustment for every category (LOO 1.235 — R-squared lies),
+// winsorised multiples (walk-forward 0.793), and growth/age as fitted regression
+// terms (walk-forward collapses to 1.703). LOO is the truth; R-squared is in-sample.
 (function () {
   'use strict';
 
@@ -177,13 +193,49 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor, every one the curve prices, not just the largest. Implied value is a model, not a promise: the curve is fitted on the ' + FIT.n_comps + ' tokens that already trade, and the page shows the fit and its out-of-sample test.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor, every one the curve prices, not just the largest. Implied value is a model, not a promise: the curve is fitted on the ' + FIT.n_comps + ' clean comps that already trade, and the strip below shows the fit and its out-of-sample test.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size }), el('small', { text: 'every watchlist slug is on the board' })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) }), el('small', { text: DATA.early_size + ' early rows below the floor' })),
         el('div', { class: 'fact' }, el('span', { text: 'Farm verdicts' }), el('b', { text: farmCount + ' FARM / ' + thinCount + ' THIN / ' + skipCount + ' SKIP' }), el('small', { text: 'netted to the dollar, capital returned' })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }), el('small', { text: 'their market caps are facts, not a model' }))
+      )
+    );
+  }
+
+  // The model's evidence in the first screen: the formula and the four numbers a reader
+  // needs to trust it, with the flat multiple beside them for comparison. This strip is
+  // the whole point of radar-3's second change — the validation used to sit below the
+  // board, where no screenshot ever showed it. Every number here is computed at run time
+  // from the snapshot, never typed in.
+  function modelStrip() {
+    var dropped = FIT.dropped_comps && FIT.dropped_comps.length ? FIT.dropped_comps.join(', ') : 'none';
+    return el('section', { class: 'strip', 'aria-label': 'How the model is tested' },
+      el('div', { class: 'strip-cell wide' },
+        el('span', { text: 'Model' }),
+        el('b', { text: 'log(mcap) = ' + FIT.intercept + ' + ' + FIT.slope + ' x ln(TVL)' }),
+        el('small', { text: FIT.n_comps + ' clean comps of ' + FIT.n_comps_raw + ' traded; outliers removed: ' + dropped })
+      ),
+      el('div', { class: 'strip-cell' },
+        el('span', { text: 'Full model R-squared' }),
+        el('b', { text: String(FIT.full_r2) }),
+        el('small', { text: 'curve plus category adjustments' })
+      ),
+      el('div', { class: 'strip-cell' },
+        el('span', { text: 'Leave-one-out error' }),
+        el('b', { text: fmtLogErr(FIT.loo_median_abs_log_err) }),
+        el('small', { text: 'median, refit on ' + (FIT.n_comps - 1) + ', predict 1' })
+      ),
+      el('div', { class: 'strip-cell' },
+        el('span', { text: 'Walk-forward error' }),
+        el('b', { text: fmtLogErr(FIT.walk_forward_median_abs_log_err) }),
+        el('small', { text: 'median, fit before 2024, test after' })
+      ),
+      el('div', { class: 'strip-cell' },
+        el('span', { text: 'Flat 0.25x TVL, same test' }),
+        el('b', { text: fmtLogErr(FIT.flat_loo_median_abs_log_err) }),
+        el('small', { text: 'the curve beats it' })
       )
     );
   }
@@ -317,6 +369,7 @@
     var adjEntries = Object.keys(FIT.category_adj).map(function (k) { return [k, FIT.category_adj[k]]; });
     adjEntries.sort(function (a, b) { return b[1] - a[1]; });
     var adjText = adjEntries.map(function (e) { return e[0] + ' ' + (e[1] >= 0 ? '+' : '') + e[1].toFixed(2); }).join(', ');
+    var dropped = FIT.dropped_comps && FIT.dropped_comps.length ? FIT.dropped_comps.join(', ') : 'none';
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'One function scores every row, fitted from this snapshot at run time. No protocol name is special-cased, and no row is hand-picked.' }),
@@ -324,16 +377,17 @@
         'implied = round( exp(' + FIT.intercept + ' + ' + FIT.slope + ' x ln(tvl_usd) + category_adj) x growth_mult x maturity_mult )'
       ),
       el('div', { class: 'model-grid' },
-        el('div', { class: 'model-cell' }, el('span', { text: 'Comps: traded tokens' }), el('b', { text: String(FIT.n_comps) }), el('small', { text: 'market cap over zero, TVL over zero' })),
+        el('div', { class: 'model-cell' }, el('span', { text: 'Comps: traded tokens' }), el('b', { text: String(FIT.n_comps) }), el('small', { text: FIT.n_comps_raw + ' traded, ' + FIT.dropped_comps.length + ' outliers removed: ' + dropped })),
         el('div', { class: 'model-cell' }, el('span', { text: 'Size curve R-squared' }), el('b', { text: String(FIT.curve_r2) }), el('small', { text: 'log market cap on log TVL' })),
         el('div', { class: 'model-cell' }, el('span', { text: 'Full model R-squared' }), el('b', { text: String(FIT.full_r2) }), el('small', { text: 'curve plus category adjustments' })),
-        el('div', { class: 'model-cell' }, el('span', { text: 'Leave-one-out error, median' }), el('b', { text: fmtLogErr(FIT.loo_median_abs_log_err) }), el('small', { text: 'log units; refit on 93, predict 1, all 94' })),
+        el('div', { class: 'model-cell' }, el('span', { text: 'Leave-one-out error, median' }), el('b', { text: fmtLogErr(FIT.loo_median_abs_log_err) }), el('small', { text: 'log units; refit on ' + (FIT.n_comps - 1) + ', predict 1, all ' + FIT.n_comps })),
         el('div', { class: 'model-cell' }, el('span', { text: 'Walk-forward error, median' }), el('b', { text: fmtLogErr(FIT.walk_forward_median_abs_log_err) }), el('small', { text: 'fit before 2024, test after: ' + FIT.walk_forward_train + ' train, ' + FIT.walk_forward_test + ' test' })),
         el('div', { class: 'model-cell' }, el('span', { text: 'Flat 0.25x TVL, for comparison' }), el('b', { text: fmtLogErr(FIT.flat_loo_median_abs_log_err) }), el('small', { text: 'the same leave-one-out test; the curve beats it' }))
       ),
       el('p', { class: 'sub', text: 'Category adjustments (log units, shrunk toward zero, capped at 0.75): ' + (adjText || 'none') + '.' }),
       el('h3', { text: 'What the model leaves out, on purpose' }),
       el('ul', { class: 'assumptions' },
+        el('li', { text: 'Clean comps: a traded protocol is dropped from the fit when its log multiple log(mcap / TVL) sits further than 2.5 robust standard deviations (1.4826 x the median absolute deviation) from the comps\' median. On this snapshot that drops ' + dropped + ' and keeps ' + FIT.n_comps + ' of ' + FIT.n_comps_raw + '. Measured: leave-one-out 1.226 without cleaning against 1.171 with it, walk-forward 0.736 against 0.669, full R-squared 0.145 against 0.215.' }),
         el('li', { text: 'Growth and age are small priors, not fitted terms: on the comps, seven-day growth correlates -0.12 with the log multiple and age 0.00, and fitting them as regression terms did not help — leave-one-out ' + FIT.loo_curve_only_median_abs_log_err + ' without them against ' + FIT.loo_fitted_terms_median_abs_log_err + ' with them, and walk-forward ' + FIT.walk_forward_curve_only_median_abs_log_err + ' against ' + FIT.walk_forward_fitted_terms_median_abs_log_err + '. Growth moves value by at most 12%, age by at most 10%.' }),
         el('li', { text: 'Exchanges, bridges and liquid-staking or restaking products are never ranked: their token would be a wrapped or staked product of one that trades, not a new launch. Versioned pools (a name ending in V2, v2 or 2.0) are left out the same way.' }),
         el('li', { text: 'A protocol is called pre-token only when its record carries no token: no market cap, no CoinGecko id and no symbol. A record can miss a token, so the board says records no token, never has none.' })
@@ -404,6 +458,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(modelStrip());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());

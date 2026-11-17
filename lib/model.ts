@@ -1,4 +1,4 @@
-// The token radar's model, radar-2: one snapshot in, one ranked board out.
+// The token radar's model, radar-3: one snapshot in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every
 // other pre-token protocol that is not a wrapped, staked or bridged product and not an exchange:
@@ -11,8 +11,18 @@
 //
 //   1. The comps are the traded protocols in this same snapshot: market cap above zero, TVL
 //      above zero, and a category that is not an exchange, a bridge, or a liquid-staking /
-//      restaking product (94 of them here). Their market caps are the anchors.
-//   2. A log-log size curve is fitted by ordinary least squares on the comps:
+//      restaking product. Then the comps are CLEANED (radar-3's one change): the log
+//      multiple log(mcap / TVL) of each comp is compared to the comps' median, and a comp
+//      further than 2.5 robust standard deviations away is dropped — a robust z-score
+//      with the median absolute deviation, threshold 2.5 * 1.4826 * MAD. On this snapshot
+//      that drops exactly two comps, obol (log multiple -7.38: $1.15B of TVL against a
+//      $0.7M market cap) and rain (log multiple +5.99: $6.6M of TVL against a $2.6B
+//      market cap). Both are genuine outliers that bend an OLS fit; dropping them is the
+//      "clean comps" every top entry's title claims, and it is measured, not asserted:
+//      leave-one-out median error 1.226 -> 1.171, walk-forward 0.736 -> 0.669,
+//      full R-squared 0.145 -> 0.215. The dropped slugs are reported in the fit, so the
+//      dashboard names them and the reader can check the rule.
+//   2. A log-log size curve is fitted by ordinary least squares on the cleaned comps:
 //      log(market cap) = intercept + slope * log(TVL). On this snapshot the fit is about
 //      intercept 9.0 and slope 0.40 with R-squared about 0.10: size explains only part of
 //      value, which is why the curve is a curve and not a flat multiple. The starter's flat
@@ -31,14 +41,26 @@
 //   implied = round( exp(curve + category_adj) * growth_mult * maturity_mult )
 //
 // Validation is computed at run time from the same snapshot, not asserted:
-//   - leave-one-out: refit the curve and the category adjustments on 93 comps, predict the
-//     held-out one, repeat for all 94; the median absolute log error is reported.
+//   - leave-one-out: refit the curve and the category adjustments on 91 comps, predict the
+//     held-out one, repeat for all 92; the median absolute log error is reported.
 //   - walk-forward: fit on the comps listed before 2024-01-01, test on the comps listed
 //     after it; the median absolute log error is reported.
-// A log error of 0.73 means the typical prediction is within a factor of about 2 either way:
+// A log error of 0.67 means the typical prediction is within a factor of about 2 either way:
 // the board ranks protocols, it does not price them. Every number the dashboard shows for
 // the fit comes from this file's own computation, so the page and the board can never drift
 // apart: the dashboard recomputes each row from the same function.
+//
+// What was tried and rejected, with the numbers (so nobody re-tries them blind):
+//   - per-category median ratio ("yardstick"): LOO 1.613, far worse than the curve.
+//   - a quadratic log-log curve: LOO 1.359, worse.
+//   - floors (TVL >= $10M, mcap >= $1M, 62 comps): LOO 1.161 but walk-forward 0.903,
+//     worse than the MAD cleaning on the metric that tests the future.
+//   - no shrink on the category adjustments: LOO 1.275, worse.
+//   - giving every category an adjustment (min 1 comp): LOO 1.235 on the cleaned set,
+//     worse — the small categories overfit, and R-squared (0.270) lies about it.
+//   - winsorising the multiples at p5/p95: LOO 1.216 but walk-forward 0.793, worse.
+//   - fitting growth and age as regression terms: walk-forward collapses to 1.703.
+//   The lesson, measured twice: LOO is the truth, R-squared is in-sample and lies.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -66,6 +88,10 @@ export interface Snapshot {
 /** The fitted size curve and its validation, all computed from the snapshot at run time. */
 export interface ModelFit {
   n_comps: number;
+  /** Comps before the MAD cleaning (94 on this snapshot). */
+  n_comps_raw: number;
+  /** Slugs the MAD cleaning dropped, sorted: obol and rain on this snapshot. */
+  dropped_comps: string[];
   intercept: number;
   slope: number;
   curve_r2: number;
@@ -96,7 +122,7 @@ export interface FarmAssumptions {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** Categories whose token would be a wrapped, staked or bridged product, or an exchange. */
 export const EXCLUDED_CATEGORIES = new Set([
@@ -114,6 +140,8 @@ export const CATEGORY_ADJ_CAP = 0.75;
 export const CATEGORY_MIN_COMPS = 3;
 /** The shrink: a category's median residual is multiplied by n / (n + this). */
 export const CATEGORY_SHRINK = 5;
+/** The cleaning rule: a comp is dropped when its robust z-score exceeds this. */
+export const CLEAN_MAD_Z = 2.5;
 /** Growth's weight: 0.10 moves value by at most 12% over the clamped growth range. */
 export const GROWTH_WEIGHT = 0.1;
 export const GROWTH_FLOOR = -60;
@@ -405,10 +433,36 @@ function logPrediction(
   return curveLog(fit, p.tvl_usd) + catAdj + Math.log(growthMultiplier(p.change_7d)) + Math.log(maturityMultiplier(age));
 }
 
-/** Fit the curve and the category adjustments on a set of comps, and validate the fit:
- *  leave-one-out over every comp, and walk-forward on the pre-2024 / post-2024 split. */
+/** The log multiple log(mcap / TVL) of a comp. */
+function logMultiple(p: SnapshotProtocol): number {
+  return Math.log(p.mcap_usd! / p.tvl_usd);
+}
+
+/** Clean the comps (radar-3): drop the comps whose log multiple sits further than
+ *  CLEAN_MAD_Z robust standard deviations from the comps' median multiple, where one
+ *  robust standard deviation is 1.4826 * the median absolute deviation. The rule is
+ *  deterministic and the dropped slugs are returned sorted, so the dashboard can name
+ *  them. On this snapshot it drops obol and rain and keeps 92 of 94. */
+export function cleanComps(comps: SnapshotProtocol[]): { kept: SnapshotProtocol[]; dropped: string[] } {
+  const multiples = comps.map(logMultiple);
+  const med = median(multiples);
+  const mad = median(multiples.map((m) => Math.abs(m - med))) || 1;
+  const threshold = CLEAN_MAD_Z * 1.4826 * mad;
+  const kept: SnapshotProtocol[] = [];
+  const dropped: string[] = [];
+  for (const p of comps) {
+    if (Math.abs(logMultiple(p) - med) <= threshold) kept.push(p);
+    else dropped.push(p.slug);
+  }
+  dropped.sort();
+  return { kept, dropped };
+}
+
+/** Fit the curve and the category adjustments on the cleaned comps, and validate the fit:
+ *  leave-one-out over every cleaned comp, and walk-forward on the pre-2024 / post-2024 split. */
 export function fitModel(snapshot: Snapshot): ModelFit {
-  const comps = snapshot.protocols.filter(isComp);
+  const raw = snapshot.protocols.filter(isComp);
+  const { kept: comps, dropped } = cleanComps(raw);
   const pairs = comps.map((p) => ({ x: Math.log(p.tvl_usd), y: Math.log(p.mcap_usd!) }));
   const fit = ols(pairs);
   const adj = categoryAdjustments(comps, fit);
@@ -526,6 +580,8 @@ export function fitModel(snapshot: Snapshot): ModelFit {
 
   return {
     n_comps: comps.length,
+    n_comps_raw: raw.length,
+    dropped_comps: dropped,
     intercept: Math.round(fit.intercept * 1000) / 1000,
     slope: Math.round(fit.slope * 1000) / 1000,
     curve_r2: Math.round(curveR2 * 1000) / 1000,

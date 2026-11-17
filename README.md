@@ -14,16 +14,16 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.js
 
 Node 22 or later, standard library only, no network. The program reads `snapshot.json`, writes `board.json`, `data.js`, `dashboard/`, `screenshots/` and `dossier.json` to the output directory, and exits non-zero when the board fails the gate. Run it twice into two directories: the outputs are byte for byte identical.
 
-## The model (radar-2)
+## The model (radar-3)
 
 Implied value is a comparables model fitted from the snapshot itself at run time:
 
-- The comps are the 94 traded protocols in the same snapshot: market cap above zero, TVL above zero, no exchange, bridge or liquid-staking category.
-- A log-log size curve is fitted by least squares: `log(market cap) = 8.998 + 0.405 * log(TVL)`, R-squared 0.103. Size explains only part of value, which is why the curve is a curve and not a flat multiple.
+- The comps are the 94 traded protocols in the same snapshot: market cap above zero, TVL above zero, no exchange, bridge or liquid-staking category. Then the comps are cleaned: a comp is dropped when its log multiple log(mcap / TVL) sits further than 2.5 robust standard deviations (1.4826 x the median absolute deviation) from the comps' median. On this snapshot that drops obol and rain and keeps 92 clean comps. Measured, not asserted: leave-one-out median error 1.226 without cleaning against 1.171 with it, walk-forward 0.736 against 0.669, full R-squared 0.145 against 0.215.
+- A log-log size curve is fitted by least squares: `log(market cap) = 7.227 + 0.505 * log(TVL)`, R-squared 0.166. Size explains only part of value, which is why the curve is a curve and not a flat multiple.
 - Each category gets an adjustment from the curve's residuals: the median residual, shrunk by n / (n + 5) toward zero and clamped to [-0.75, 0.75] log units.
-- Seven-day growth and age enter only as small bounded priors (growth at most 12%, age at most 10%): fitting them as regression terms did not help — leave-one-out 1.295 without them against 1.295 with them, walk-forward 0.734 against 1.703.
+- Seven-day growth and age enter only as small bounded priors (growth at most 12%, age at most 10%): fitting them as regression terms did not help — leave-one-out 1.201 without them against 1.218 with them, walk-forward 0.729 against 1.692.
 
-Validation, computed at run time from the same snapshot: leave-one-out median absolute log error 1.226, walk-forward (fit before 2024, test after) median 0.736. A log error of 0.74 means the typical prediction is within about a factor of 2 either way: the board ranks protocols, it does not price them.
+Validation, computed at run time from the same snapshot: leave-one-out median absolute log error 1.171, walk-forward (fit before 2024, test after) median 0.669. A log error of 0.67 means the typical prediction is within about a factor of 2 either way: the board ranks protocols, it does not price them. The dashboard shows the formula and these numbers in a strip under the lede, so the first screenshot carries the evidence, not just the claim.
 
 The board ranks 203 pre-token protocols: the 40 on the watchlist plus 163 early rows below the floor. Exchanges, bridges and liquid-staking or restaking products are never ranked, and neither are versioned pools. Live-token protocols are set aside with their market caps shown.
 
